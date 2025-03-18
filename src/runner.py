@@ -8,5 +8,5 @@ if not os.path.exists("./src/common/faiss-vme"):
 if not os.path.exists("./src/common/chroma-vme"):
     create_chroma()
 
-faiss = load_faiss()
-chroma = load_chroma()
+load_faiss()
+load_chroma()
