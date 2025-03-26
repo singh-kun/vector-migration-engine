@@ -1,5 +1,7 @@
 import chromadb
 import faiss
+import weaviate
+from langchain_weaviate.vectorstores import WeaviateVectorStore
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_community.vectorstores import FAISS
 from langchain_chroma import Chroma
@@ -32,3 +34,19 @@ def create_chroma():
     )
 
     chroma_vector_store_from_client.add_documents(documents=documents, ids=uuids)
+
+def create_weaviate():
+
+    # Create Weaviate vector store
+    weaviate_client = weaviate.connect_to_local()
+    weaviate_vector_store = WeaviateVectorStore.from_documents(documents=documents, ids=uuids, embedding=embedding_model, client=weaviate_client, index_name = "kgedemo", text_key= "kge")
+    results = weaviate_vector_store.similarity_search(
+        "LangChain provides abstractions to make working with LLMs easy"
+    )
+    for i, doc in enumerate(results):
+        print(f"\nDocument {i+1}:")
+        print(doc.page_content[:100] + "...")
+    weaviate_client.close()
+
+    
+    # A --> B (requirement)
