@@ -1,5 +1,8 @@
 from langchain_community.vectorstores import FAISS
 from langchain_chroma import Chroma
+import weaviate
+from langchain_community.vectorstores import Weaviate
+from langchain_weaviate.vectorstores import WeaviateVectorStore
 from .load_model import embedding_model
 
 
@@ -21,7 +24,6 @@ def load_faiss():
 
     return results
 
-
 def load_chroma():
 
     chroma_vector_store = Chroma(
@@ -41,3 +43,19 @@ def load_chroma():
 
     return results
 
+def load_weaviate():
+    
+    weaviate_client = weaviate.connect_to_local()
+    weaviate_vector_store = WeaviateVectorStore(embedding=embedding_model, client=weaviate_client, index_name = "kgedemo", text_key= "kge")
+    results = weaviate_vector_store.similarity_search(
+        "LangChain provides abstractions to make working with LLMs easy",
+        k=4
+    )
+    weaviate_client.close()
+    for i, doc in enumerate(results):
+        print(f"\nDocument {i+1}:")
+        print(doc.page_content[:100] + "...")
+    
+    return results
+
+    
