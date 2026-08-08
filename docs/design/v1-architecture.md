@@ -1,6 +1,6 @@
 # Vector Migration Engine v1 architecture
 
-**Status:** Proposed for implementation  
+**Status:** Accepted; MVP1 implementation in progress
 **Date:** 2026-08-08  
 **Branch:** `feature/v1.0`  
 **Research:** [Vector database migration research](../research/vector-database-capability-matrix.md)
@@ -877,4 +877,3 @@ These require implementation evidence rather than an architectural guess:
 - the first certified live-migration adapter pair.
 
 None of these changes the canonical record, capability, planning, or checkpoint-after-ack boundaries defined here.
-

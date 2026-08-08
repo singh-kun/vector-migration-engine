@@ -1,0 +1,48 @@
+apiVersion: vme.io/v1
+kind: Migration
+
+metadata:
+  name: chroma-to-qdrant-mvp1
+
+source:
+  adapter: chroma
+  connection:
+    path: ./data/chroma
+  resource:
+    collection: source_collection
+    # Set this only if the adapter cannot discover the existing collection setting.
+    metric: cosine
+
+destination:
+  adapter: qdrant
+  connection:
+    url: http://localhost:6333
+    # For Qdrant Cloud, uncomment the environment-backed secret:
+    # api_key: env:QDRANT_API_KEY
+  resource:
+    collection: source_collection_vme_staging
+
+mapping:
+  ids:
+    # Chroma accepts arbitrary strings; Qdrant accepts UUID strings or uint64 IDs.
+    policy: deterministic_uuid
+    namespace: 60f5f0b8-6574-4b98-9f55-e365efa51e20
+  vectors:
+    default:
+      to: default
+
+execution:
+  batch:
+    max_records: 500
+    max_bytes: 8388608
+  concurrency:
+    partitions: 1
+    writers: 4
+  retry:
+    max_attempts: 8
+    base_delay_seconds: 0.25
+    max_delay_seconds: 30
+
+verification:
+  sample:
+    records: 1000

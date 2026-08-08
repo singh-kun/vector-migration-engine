@@ -1,0 +1,38 @@
+{
+  "apiVersion": "vme.io/v1",
+  "kind": "Migration",
+  "metadata": {
+    "name": "memory-demo"
+  },
+  "source": {
+    "adapter": "memory",
+    "resource": {
+      "collection": "source",
+      "records": [
+        {
+          "id": "document-1",
+          "vectors": {"default": [0.1, 0.2, 0.3]},
+          "document": "A production-safe migration starts with a plan.",
+          "metadata": {"category": "example"}
+        }
+      ]
+    }
+  },
+  "destination": {
+    "adapter": "memory",
+    "resource": {
+      "collection": "target"
+    }
+  },
+  "mapping": {
+    "ids": {"policy": "preserve"}
+  },
+  "execution": {
+    "batch": {"max_records": 500, "max_bytes": 8388608},
+    "concurrency": {"partitions": 2, "writers": 4},
+    "retry": {"max_attempts": 8}
+  },
+  "verification": {
+    "sample": {"records": 1000}
+  }
+}

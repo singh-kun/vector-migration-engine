@@ -1,4 +1,1 @@
-langchain-ollama
-langchain-chroma
-langchain-community
-faiss-cpu
+PyYAML>=6.0

@@ -176,3 +176,6 @@ cython_debug/
 *.faiss
 *.pkl
 *.bin
+.vme/
+*.sqlite3-wal
+*.sqlite3-shm
