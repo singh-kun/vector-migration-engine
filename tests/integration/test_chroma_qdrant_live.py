@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from vme.server.app import create_app
 from vme.server.secrets import SecretResolver
+from vme.server.security import EndpointPolicy
 from vme.server.settings import ServerSettings
 from vme.server.store import SQLiteServiceStore
 from vme.server.worker import ServiceWorker
@@ -196,11 +197,20 @@ class LiveChromaToQdrantTest(unittest.TestCase):
                 resolver=SecretResolver(),
                 lease_seconds=30,
                 worker_id="live-integration-worker",
+                endpoint_policy=EndpointPolicy(
+                    allowed_adapters=("chroma", "qdrant"),
+                    allowed_data_roots=(root_path,),
+                    allowed_endpoints=(),
+                    allow_insecure_endpoints=False,
+                    allow_embedded_chroma=True,
+                ),
             )
             service_settings = ServerSettings(
                 state_path=state_path,
                 auth_mode="none",
                 run_worker=False,
+                allowed_data_roots=(root_path,),
+                allow_embedded_chroma=True,
             )
             try:
                 with TestClient(create_app(service_settings, store=store, worker=worker)) as client:

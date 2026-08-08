@@ -294,9 +294,10 @@ before probe/run and keeps the value in memory only.
 
 - TLS verification is on by default; disabling it creates a blocking or explicitly acknowledged
   plan finding.
-- The planned enterprise deployment must define allowed destination hostnames/CIDRs and deny cloud
-  metadata, loopback, link-local, and other forbidden addresses unless an administrator explicitly
-  allows them. This egress enforcement is not yet implemented.
+- The service enforces explicit adapter, local-data-root, and `host-or-CIDR:port` endpoint
+  allowlists and requires TLS by default. Enterprise deployments must enforce the same policy at
+  the network layer to deny cloud metadata, loopback, link-local, cluster-management, and
+  container-runtime endpoints even if application validation is bypassed.
 - Only preinstalled adapters can run. Runtime upload/import of arbitrary Python plugins is disabled.
 - Logs/events never contain vectors, documents, metadata, secrets, or sensitive request headers.
 - Audit events include actor, workspace, request ID, action, resource, result, and timestamp.
@@ -337,7 +338,7 @@ Explicitly deferred:
 - PostgreSQL state, multiple API/worker replicas, and HA certification;
 - dedicated connection-test resources, profile updates, and migration updates;
 - API-client CLI commands and generated SDK publication;
-- enterprise endpoint egress/SSRF enforcement and deployment manifests;
+- network-layer egress templates, ingress rate-limit examples, and enterprise manifests;
 - public multi-tenant SaaS and billing;
 - browser UI;
 - hosted control plane/customer-agent protocol;
@@ -373,7 +374,8 @@ Completed service slice:
 7. Add a non-root OCI image and hardened local Compose example.
 
 Next enterprise slice: PostgreSQL queue/checkpoint state, atomic idempotency under multiple API
-replicas, endpoint egress policy, published API clients, metrics export, and HA manifests/tests.
+replicas, network-layer egress templates, published API clients, metrics export, and HA
+manifests/tests.
 
 ## 14. Local MVP1 acceptance criteria
 
@@ -399,7 +401,7 @@ replicas, endpoint egress policy, published API clients, metrics export, and HA 
 3. REST profiles, plans, jobs, events, and reports using local token auth.
 4. End-to-end local Compose certification using the live integration corpus.
 5. PostgreSQL state store, replica-safe idempotency, and lease-fencing tests.
-6. Endpoint egress policy, metrics, and API-client CLI/SDK generation.
+6. NetworkPolicy/firewall templates, ingress rate limits, metrics, and API-client CLI/SDK generation.
 7. Enterprise deployment manifest and restart/failure certification.
 
 This order proves durability before adding network presentation or enterprise deployment machinery.

@@ -141,7 +141,8 @@ class QdrantAdapter(SourceAdapter, DestinationAdapter):
     async def prepare(self, plan: MigrationPlan, *, resume: bool = False) -> None:
         client = await self._client()
         models = self._models
-        assert models is not None
+        if models is None:
+            raise AdapterConfigurationError("Qdrant client models were not initialized")
         exists = bool(await sdk_call(client.collection_exists, self.collection_name))
         self._target_vector_names = tuple(plan.target.vector_fields)
         self._target_named = len(self._target_vector_names) > 1 or self._target_vector_names != (
@@ -172,7 +173,8 @@ class QdrantAdapter(SourceAdapter, DestinationAdapter):
     async def write_batch(self, records: Sequence[VectorRecord]) -> BatchWriteResult:
         client = await self._client()
         models = self._models
-        assert models is not None
+        if models is None:
+            raise AdapterConfigurationError("Qdrant client models were not initialized")
         points = []
         for record in records:
             if self.document_field in record.metadata:

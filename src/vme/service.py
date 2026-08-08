@@ -53,6 +53,7 @@ async def run_migration(
     job_id: str | None = None,
     should_stop: Callable[[], bool] | None = None,
     lease_is_valid: Callable[[], bool] | None = None,
+    error_redactor: Callable[[str], str] | None = None,
     registry: AdapterRegistry | None = None,
 ) -> RunSummary:
     registry = registry or builtin_registry()
@@ -90,6 +91,7 @@ async def run_migration(
                 options=settings.execution,
                 should_stop=should_stop,
                 lease_is_valid=lease_is_valid,
+                error_redactor=error_redactor,
             )
             executor_started = True
             effective_job_id = resume_job_id or job_id

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -15,6 +16,8 @@ _ROLE_ORDER = {
     WorkspaceRole.OPERATOR: 1,
     WorkspaceRole.ADMIN: 2,
 }
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$")
+_OIDC_ALGORITHMS = ("RS256", "ES256")
 
 
 class AuthenticationError(Exception):
@@ -33,27 +36,36 @@ class Authenticator:
                     "OIDC mode requires `pip install vector-migration-engine[server]`"
                 ) from error
             self._jwt = jwt
-            self._jwks_client = jwt.PyJWKClient(str(settings.oidc_jwks_url), cache_keys=True)
+            self._jwks_client = jwt.PyJWKClient(
+                str(settings.oidc_jwks_url),
+                cache_keys=False,
+                cache_jwk_set=True,
+                lifespan=300,
+                timeout=5,
+            )
 
     def authenticate(self, authorization: str | None) -> Actor:
         if self.settings.auth_mode == "none":
             return Actor("local", self.settings.workspace_id, WorkspaceRole.ADMIN)
         token = _bearer_token(authorization)
         if self.settings.auth_mode == "token":
-            assert self.settings.api_token is not None
-            if not hmac.compare_digest(token, self.settings.api_token):
+            expected_token = self.settings.api_token
+            if expected_token is None:
+                raise ConfigurationError("token authentication is not configured")
+            if not hmac.compare_digest(token, expected_token):
                 raise AuthenticationError("invalid bearer token")
             return Actor("local-token", self.settings.workspace_id, WorkspaceRole.ADMIN)
         return self._authenticate_oidc(token)
 
     def _authenticate_oidc(self, token: str) -> Actor:
-        assert self._jwks_client is not None
+        if self._jwks_client is None:
+            raise ConfigurationError("OIDC authentication is not configured")
         try:
             signing_key = self._jwks_client.get_signing_key_from_jwt(token)
             claims = self._jwt.decode(
                 token,
                 signing_key.key,
-                algorithms=["RS256", "ES256"],
+                algorithms=list(_OIDC_ALGORITHMS),
                 audience=self.settings.oidc_audience,
                 issuer=self.settings.oidc_issuer,
                 options={"require": ["exp", "iat", "sub"]},
@@ -61,10 +73,13 @@ class Authenticator:
         except Exception as error:
             raise AuthenticationError("OIDC token validation failed") from error
         workspace = claims.get(self.settings.oidc_workspace_claim)
-        if not isinstance(workspace, str) or not workspace:
+        if not isinstance(workspace, str) or not _IDENTIFIER.fullmatch(workspace):
             raise AuthenticationError("OIDC token has no valid workspace claim")
         role = _highest_role(claims.get(self.settings.oidc_roles_claim))
-        return Actor(str(claims["sub"]), workspace, role)
+        subject = claims["sub"]
+        if not isinstance(subject, str) or not _IDENTIFIER.fullmatch(subject):
+            raise AuthenticationError("OIDC token has no valid subject claim")
+        return Actor(subject, workspace, role)
 
 
 def require_role(actor: Actor, required: WorkspaceRole) -> None:
@@ -76,7 +91,13 @@ def _bearer_token(authorization: str | None) -> str:
     if not authorization:
         raise AuthenticationError("missing bearer token")
     scheme, separator, token = authorization.partition(" ")
-    if not separator or scheme.lower() != "bearer" or not token:
+    if (
+        not separator
+        or scheme.lower() != "bearer"
+        or not token
+        or len(token) > 4096
+        or any(char.isspace() for char in token)
+    ):
         raise AuthenticationError("authorization must use the Bearer scheme")
     return token
 

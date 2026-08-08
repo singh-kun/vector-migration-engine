@@ -24,6 +24,8 @@ MVP1 implements the first production-oriented slice of the [v1 architecture](des
   checkpoint boundaries.
 - Local bearer-token and OIDC workspace-role authentication.
 - Environment/file secret references with plaintext-credential rejection and response redaction.
+- Strict adapter/path/endpoint allowlists, TLS-by-default endpoint policy, request/host limits,
+  security headers, hashed idempotency keys, and provider-error secret scrubbing.
 - A non-root OCI image and Compose profile with independently restartable API and worker services.
 - Buildable Python wheel with optional provider dependency groups.
 
@@ -81,7 +83,8 @@ service is required for this embedded gate.
 ## Next implementation slice
 
 1. Add a PostgreSQL service/checkpoint store with replica-safe idempotency and HA lease tests.
-2. Add endpoint egress/SSRF policy, metrics export, and published API client commands/SDKs.
+2. Add network-layer egress templates, rate-limit examples, metrics export, and published API
+   client commands/SDKs.
 3. Add Docker-backed Chroma and Qdrant integration tests pinned to supported SDK/server versions.
 4. Move semantic top-k overlap from the release gate into a configurable migration verifier and
    add full-dataset bucket digests.

@@ -15,8 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-chroma = ["chromadb>=1.0"]
-qdrant = ["qdrant-client>=1.10"]
+chroma = ["chromadb>=1.0,<2"]
+chroma-client = ["chromadb-client>=1.0,<2"]
+qdrant = ["qdrant-client>=1.10,<2"]
 server = [
   "fastapi>=0.116,<1",
   "uvicorn[standard]>=0.35,<1",

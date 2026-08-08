@@ -16,13 +16,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN groupadd --system --gid 10001 vme \
     && useradd --system --uid 10001 --gid vme --home-dir /var/lib/vme vme \
     && mkdir -p /var/lib/vme \
-    && chown -R vme:vme /var/lib/vme
+    && chown -R vme:vme /var/lib/vme \
+    && chmod 700 /var/lib/vme
 
 WORKDIR /app
 COPY --from=builder /wheels /wheels
 RUN wheel_path="$(find /wheels -name 'vector_migration_engine-*.whl' -print -quit)" \
-    && python -m pip install --no-cache-dir "${wheel_path}[server,chroma,qdrant]" \
-    && rm -rf /wheels
+    && python -m pip install --no-cache-dir "${wheel_path}[server,chroma-client,qdrant]" \
+    && rm -rf /wheels \
+    && python -m pip uninstall --yes pip setuptools wheel
 
 USER 10001:10001
 EXPOSE 8080

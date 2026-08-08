@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -19,12 +20,13 @@ from vme.state.base import JobSnapshot, PartitionSnapshot, SampleExpectation
 class SQLiteStateStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._configure()
         self._migrate()
+        _secure_state_files(self.path)
 
     def _configure(self) -> None:
         with self._connection:
@@ -315,3 +317,11 @@ class SQLiteStateStore:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _secure_state_files(path: Path) -> None:
+    if os.name != "posix":
+        return
+    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+        if candidate.exists():
+            os.chmod(candidate, 0o600)

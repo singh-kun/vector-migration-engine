@@ -25,6 +25,11 @@ pip install -e ".[chroma,qdrant]"  # install the provider SDKs you need
 
 Python 3.11 or newer is required.
 
+The full `chroma` extra is intended for embedded development and integration tests. The production
+container uses the official `chromadb-client` thin HTTP client and disables embedded Chroma; review
+the [security advisory boundary](docs/security.md#chroma-dependency-advisory) before installing the
+full package in any deployed environment.
+
 ## Run the local MVP example
 
 ```bash
@@ -51,8 +56,11 @@ export VME_API_TOKEN="replace-with-a-long-random-token"
 docker compose up --build
 ```
 
-The API listens on `http://127.0.0.1:8080`; interactive OpenAPI documentation is available at
-`http://127.0.0.1:8080/docs`. Create resources in this order:
+The API listens on `http://127.0.0.1:8080`. OpenAPI documentation is disabled by default; enable
+`VME_EXPOSE_DOCS=true` only on a trusted network. Before creating a network profile, set an exact
+allowlist such as `VME_ENDPOINT_ALLOWLIST=qdrant.internal:6333`. Local embedded paths must remain
+under `VME_DATA_ROOTS` (the Compose profile mounts `./data` as `/data`). Create resources in this
+order:
 
 1. `POST /v1/connection-profiles` for the source and destination.
 2. `POST /v1/migrations` to bind profiles, collections, mappings, and limits.
@@ -61,13 +69,17 @@ The API listens on `http://127.0.0.1:8080`; interactive OpenAPI documentation is
 
 Mutating requests require an `Idempotency-Key`; authenticated requests use
 `Authorization: Bearer $VME_API_TOKEN`. Credentials must be `env:NAME` or
-`file:/mounted/path#key` references—plaintext secret-looking fields are rejected.
+`file:/mounted/path#key` references—plaintext secret-looking fields are rejected. Environment
+references also require the name in `VME_SECRET_ENV_ALLOWLIST`; file references must be below
+`VME_SECRET_FILE_ROOTS`.
 
 MVP1 is production-oriented for a single-node, self-hosted data plane. The Compose profile keeps
 API lifecycle separate from migration execution and persists both service resources and
 record-level checkpoints. PostgreSQL shared state, multiple replicas, endpoint egress policy, and
 HA enterprise certification remain the next deployment slice; see the
 [service architecture](docs/design/mvp1-service-architecture.md) for the exact boundary.
+Review the [security model and production checklist](docs/security.md) before exposing the service
+outside a developer workstation.
 
 ## Development
 

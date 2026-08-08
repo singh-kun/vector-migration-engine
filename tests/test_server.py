@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from vme.errors import ConfigurationError, redact_text
 from vme.server.app import create_app
-from vme.server.models import DesiredState, PlanStatus, ServiceJobStatus
+from vme.server.configuration import resolved_migration_settings
+from vme.server.models import DesiredState, PlanStatus, ProfileRole, ServiceJobStatus
 from vme.server.secrets import SecretResolver
+from vme.server.security import EndpointPolicy
 from vme.server.settings import ServerSettings
 from vme.server.store import SQLiteServiceStore
 from vme.server.worker import ServiceWorker
@@ -24,6 +28,17 @@ class ServiceApiTests(unittest.TestCase):
             state_path=self.state_path,
             auth_mode="none",
             run_worker=False,
+            allowed_adapters=("memory", "chroma", "qdrant"),
+            allowed_data_roots=(Path(self.temporary.name),),
+            allowed_endpoints=("qdrant.test:6333",),
+            allowed_secret_env_names=("QDRANT_API_KEY",),
+        )
+        self.endpoint_policy = EndpointPolicy(
+            allowed_adapters=self.settings.allowed_adapters,
+            allowed_data_roots=self.settings.allowed_data_roots,
+            allowed_endpoints=self.settings.allowed_endpoints,
+            allow_insecure_endpoints=False,
+            allow_embedded_chroma=True,
         )
         self.worker = ServiceWorker(
             store=self.store,
@@ -32,6 +47,7 @@ class ServiceApiTests(unittest.TestCase):
             poll_seconds=0.01,
             lease_seconds=30,
             worker_id="test-worker",
+            endpoint_policy=self.endpoint_policy,
         )
         self.client_context = TestClient(
             create_app(self.settings, store=self.store, worker=self.worker)
@@ -78,6 +94,38 @@ class ServiceApiTests(unittest.TestCase):
         self.assertNotIn("nested-secret", persisted)
         self.assertNotIn("password@example", persisted)
 
+    def test_ssrf_local_paths_and_plaintext_headers_are_denied(self) -> None:
+        blocked_connections = (
+            {
+                "name": "metadata-service",
+                "adapter": "qdrant",
+                "connection": {"url": "https://169.254.169.254:443"},
+            },
+            {
+                "name": "outside-root",
+                "adapter": "qdrant",
+                "connection": {"path": str(Path(self.temporary.name).parent / "outside")},
+            },
+            {
+                "name": "plaintext-header",
+                "adapter": "chroma",
+                "connection": {
+                    "host": "qdrant.test",
+                    "port": 6333,
+                    "ssl": True,
+                    "headers": {"X-Api-Key": "plaintext"},
+                },
+            },
+        )
+        for index, body in enumerate(blocked_connections):
+            response = self.client.post(
+                "/v1/connection-profiles",
+                headers={"Idempotency-Key": f"blocked-endpoint-{index}"},
+                json=body,
+            )
+            self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.store.list_profiles("default"), [])
+
     def test_idempotent_resource_creation_returns_the_original_profile(self) -> None:
         request = {
             "name": "source",
@@ -100,7 +148,10 @@ class ServiceApiTests(unittest.TestCase):
             json={
                 "name": "redacted",
                 "adapter": "qdrant",
-                "connection": {"api_key": "env:QDRANT_API_KEY"},
+                "connection": {
+                    "url": "https://qdrant.test:6333",
+                    "api_key": "env:QDRANT_API_KEY",
+                },
             },
         )
         self.assertEqual(response.status_code, 201, response.text)
@@ -110,6 +161,139 @@ class ServiceApiTests(unittest.TestCase):
         )
         fetched = self.client.get(f"/v1/connection-profiles/{response.json()['id']}")
         self.assertEqual(fetched.json()["connection"], response.json()["connection"])
+
+    def test_unapproved_environment_secret_references_are_rejected(self) -> None:
+        response = self.client.post(
+            "/v1/connection-profiles",
+            headers={"Idempotency-Key": "unapproved-secret-reference"},
+            json={
+                "name": "unapproved-secret",
+                "adapter": "qdrant",
+                "connection": {
+                    "url": "https://qdrant.test:6333",
+                    "api_key": "env:UNAPPROVED_SECRET",
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.store.list_profiles("default"), [])
+
+    def test_migration_resources_cannot_smuggle_secret_material(self) -> None:
+        source_id = self._profile("secret-source", "source", "secret-source-key")
+        destination_id = self._profile(
+            "secret-destination", "destination", "secret-destination-key"
+        )
+        response = self.client.post(
+            "/v1/migrations",
+            headers={"Idempotency-Key": "secret-migration-key"},
+            json={
+                "name": "unsafe-migration",
+                "source_profile_id": source_id,
+                "destination_profile_id": destination_id,
+                "source_resource": {"collection": "source", "api_key": "env:STOLEN"},
+                "destination_resource": {"collection": "target"},
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn("env:STOLEN", self.state_path.read_bytes().decode("latin1"))
+
+    def test_security_headers_docs_host_and_body_limits_are_enforced(self) -> None:
+        response = self.client.get("/v1/adapters")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(self.client.get("/docs").status_code, 404)
+        self.assertEqual(
+            self.client.get("/v1/adapters", headers={"Host": "attacker.example"}).status_code,
+            400,
+        )
+        wrong_content_type = self.client.post(
+            "/v1/connection-profiles",
+            headers={
+                "Content-Type": "text/plain",
+                "Idempotency-Key": "wrong-content-type",
+            },
+            content=b"{}",
+        )
+        self.assertEqual(wrong_content_type.status_code, 415)
+
+        limited = ServerSettings(
+            state_path=Path(self.temporary.name) / "limited.sqlite3",
+            auth_mode="none",
+            run_worker=False,
+            allowed_adapters=("memory",),
+            max_request_bytes=1024,
+        )
+        with TestClient(create_app(limited)) as client:
+            oversized = client.post(
+                "/v1/connection-profiles",
+                headers={"Idempotency-Key": "oversized-request-key"},
+                json={
+                    "name": "oversized",
+                    "adapter": "memory",
+                    "connection": {"padding": "x" * 2048},
+                },
+            )
+            self.assertEqual(oversized.status_code, 413)
+
+    def test_idempotency_keys_are_hashed_at_rest(self) -> None:
+        raw_key = "never-store-this-idempotency-key"
+        response = self.client.post(
+            "/v1/connection-profiles",
+            headers={"Idempotency-Key": raw_key},
+            json={"name": "hashed-key", "adapter": "memory", "connection": {}},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertNotIn(raw_key, self.state_path.read_bytes().decode("latin1"))
+
+    def test_resolved_secret_values_are_available_for_error_redaction(self) -> None:
+        secret = "provider-secret-value-123456"
+        previous = os.environ.get("VME_TEST_PROVIDER_SECRET")
+        os.environ["VME_TEST_PROVIDER_SECRET"] = secret
+        try:
+            values: set[str] = set()
+            resolved = SecretResolver(
+                allowed_environment_names=("VME_TEST_PROVIDER_SECRET",)
+            ).resolve("env:VME_TEST_PROVIDER_SECRET", secret_values=values)
+            self.assertEqual(resolved, secret)
+            self.assertNotIn(secret, redact_text(f"provider echoed {secret}", values))
+        finally:
+            if previous is None:
+                os.environ.pop("VME_TEST_PROVIDER_SECRET", None)
+            else:
+                os.environ["VME_TEST_PROVIDER_SECRET"] = previous
+
+    def test_worker_revalidates_persisted_profiles_before_resolving_them(self) -> None:
+        source = self.store.create_profile(
+            workspace_id="default",
+            name="tampered-source",
+            adapter="qdrant",
+            role=ProfileRole.SOURCE,
+            connection={
+                "url": "https://qdrant.test:6333",
+                "api_key": "plaintext-from-tampered-state",
+            },
+            actor="test",
+        )
+        destination_id = self._profile(
+            "tampered-destination", "destination", "tampered-destination-key"
+        )
+        migration = self.store.create_migration(
+            workspace_id="default",
+            name="tampered-state",
+            specification={
+                "source_profile_id": source.id,
+                "destination_profile_id": destination_id,
+            },
+            actor="test",
+        )
+        with self.assertRaises(ConfigurationError):
+            resolved_migration_settings(
+                self.store,
+                migration,
+                SecretResolver(allowed_environment_names=self.settings.allowed_secret_env_names),
+                endpoint_policy=self.endpoint_policy,
+            )
 
     def test_plan_and_job_run_as_durable_asynchronous_resources(self) -> None:
         source_id = self._profile("source", "source", "profile-source-key")
@@ -242,16 +426,43 @@ class AuthenticationTests(unittest.TestCase):
             settings = ServerSettings(
                 state_path=Path(directory) / "service.sqlite3",
                 auth_mode="token",
-                api_token="correct-token",
+                api_token="correct-token-that-is-at-least-32-characters",
                 run_worker=False,
             )
             with TestClient(create_app(settings)) as client:
                 self.assertEqual(client.get("/v1/adapters").status_code, 401)
                 accepted = client.get(
                     "/v1/adapters",
-                    headers={"Authorization": "Bearer correct-token"},
+                    headers={
+                        "Authorization": "Bearer correct-token-that-is-at-least-32-characters"
+                    },
                 )
                 self.assertEqual(accepted.status_code, 200)
+
+    def test_weak_static_tokens_and_insecure_oidc_urls_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least 32"):
+            ServerSettings(auth_mode="token", api_token="weak").validate()
+        with self.assertRaisesRegex(ValueError, "HTTPS URL"):
+            ServerSettings(
+                auth_mode="oidc",
+                oidc_issuer="http://issuer.example",
+                oidc_audience="vme",
+                oidc_jwks_url="https://issuer.example/jwks",
+            ).validate()
+
+    def test_endpoint_policy_accepts_only_explicit_tls_destination(self) -> None:
+        policy = EndpointPolicy(
+            allowed_adapters=("qdrant",),
+            allowed_data_roots=(),
+            allowed_endpoints=("db.example:6333",),
+            allow_insecure_endpoints=False,
+            allow_embedded_chroma=False,
+        )
+        policy.validate_connection("qdrant", {"url": "https://db.example:6333"})
+        with self.assertRaises(ConfigurationError):
+            policy.validate_connection("qdrant", {"url": "http://db.example:6333"})
+        with self.assertRaises(ConfigurationError):
+            policy.validate_connection("qdrant", {"url": "https://169.254.169.254:6333"})
 
 
 if __name__ == "__main__":

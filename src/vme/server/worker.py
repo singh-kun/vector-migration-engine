@@ -14,10 +14,12 @@ from vme.errors import (
     StateConflictError,
     TransientAdapterError,
     WorkerLeaseLostError,
+    redact_text,
 )
 from vme.server.configuration import resolved_migration_settings
 from vme.server.models import DesiredState, LeaseClaim, ServiceJobStatus
 from vme.server.secrets import SecretResolver
+from vme.server.security import EndpointPolicy
 from vme.server.store import SQLiteServiceStore
 from vme.service import build_plan, run_migration
 from vme.state.sqlite import SQLiteStateStore
@@ -33,6 +35,7 @@ class ServiceWorker:
         poll_seconds: float = 0.5,
         lease_seconds: int = 30,
         worker_id: str | None = None,
+        endpoint_policy: EndpointPolicy,
     ) -> None:
         self.store = store
         self.state_path = state_path
@@ -40,6 +43,7 @@ class ServiceWorker:
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
         self.worker_id = worker_id or f"worker-{uuid.uuid4()}"
+        self.endpoint_policy = endpoint_policy
         self._stop = asyncio.Event()
 
     async def run_forever(self) -> None:
@@ -65,6 +69,7 @@ class ServiceWorker:
         return False
 
     async def _run_plan(self, claim: LeaseClaim) -> None:
+        secret_values: set[str] = set()
         heartbeat = asyncio.create_task(
             self._heartbeat_plan(claim.resource_id, claim.lease_token),
             name=f"vme-plan-heartbeat-{claim.resource_id}",
@@ -72,7 +77,13 @@ class ServiceWorker:
         try:
             record = self.store.get_plan(claim.workspace_id, claim.resource_id)
             migration = self.store.get_migration(record.workspace_id, record.migration_id)
-            raw = resolved_migration_settings(self.store, migration, self.resolver)
+            raw = resolved_migration_settings(
+                self.store,
+                migration,
+                self.resolver,
+                secret_values=secret_values,
+                endpoint_policy=self.endpoint_policy,
+            )
             plan = await build_plan(MigrationSettings.from_mapping(raw))
             self.store.finish_plan(
                 plan_id=record.id,
@@ -83,13 +94,19 @@ class ServiceWorker:
             )
         except Exception as error:
             with suppress(StateConflictError):
-                self.store.fail_plan(claim.resource_id, claim.lease_token, str(error))
+                self.store.fail_plan(
+                    claim.resource_id,
+                    claim.lease_token,
+                    redact_text(str(error), secret_values),
+                )
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
+            secret_values.clear()
 
     async def _run_job(self, claim: LeaseClaim) -> None:
+        secret_values: set[str] = set()
         record = self.store.get_job(claim.workspace_id, claim.resource_id)
         plan_record = self.store.get_plan(record.workspace_id, record.plan_id)
         migration = self.store.get_migration(record.workspace_id, plan_record.migration_id)
@@ -98,7 +115,13 @@ class ServiceWorker:
             name=f"vme-heartbeat-{record.id}",
         )
         try:
-            raw = resolved_migration_settings(self.store, migration, self.resolver)
+            raw = resolved_migration_settings(
+                self.store,
+                migration,
+                self.resolver,
+                secret_values=secret_values,
+                endpoint_policy=self.endpoint_policy,
+            )
             settings = MigrationSettings.from_mapping(raw)
             resuming = self._engine_job_exists(record.id)
             summary = await run_migration(
@@ -109,6 +132,7 @@ class ServiceWorker:
                 job_id=None if resuming else record.id,
                 should_stop=lambda: self._should_stop(record.id, claim.lease_token),
                 lease_is_valid=lambda: self.store.job_lease_valid(record.id, claim.lease_token),
+                error_redactor=lambda value: redact_text(value, secret_values),
             )
             self.store.finish_job(
                 job_id=record.id,
@@ -136,7 +160,7 @@ class ServiceWorker:
                     job_id=record.id,
                     lease_token=claim.lease_token,
                     status=status,
-                    error=str(cause),
+                    error=redact_text(str(cause), secret_values),
                 )
         except Exception as error:
             with suppress(StateConflictError):
@@ -144,12 +168,13 @@ class ServiceWorker:
                     job_id=record.id,
                     lease_token=claim.lease_token,
                     status=ServiceJobStatus.TERMINAL_FAILED,
-                    error=str(error),
+                    error=redact_text(str(error), secret_values),
                 )
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
+            secret_values.clear()
 
     async def _heartbeat(self, job_id: str, lease_token: str) -> None:
         interval = max(1.0, self.lease_seconds / 3)

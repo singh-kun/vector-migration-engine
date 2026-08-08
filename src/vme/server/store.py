@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -28,18 +29,59 @@ from vme.server.models import (
     ServiceJobStatus,
 )
 
+_LEASE_SELECT_SQL = {
+    "service_plans": "SELECT workspace_id FROM service_plans WHERE id = ? AND lease_token = ?",
+    "service_jobs": "SELECT workspace_id FROM service_jobs WHERE id = ? AND lease_token = ?",
+}
+_LEASE_UPDATE_SQL = {
+    (
+        "service_plans",
+        "status = ?, fingerprint = ?, plan_json = ?, error = NULL",
+    ): """
+        UPDATE service_plans
+        SET status = ?, fingerprint = ?, plan_json = ?, error = NULL,
+            lease_token = NULL, lease_expires_at = NULL,
+            worker_id = NULL, updated_at = ?
+        WHERE id = ? AND lease_token = ?
+    """,
+    ("service_plans", "status = ?, error = ?"): """
+        UPDATE service_plans
+        SET status = ?, error = ?, lease_token = NULL, lease_expires_at = NULL,
+            worker_id = NULL, updated_at = ?
+        WHERE id = ? AND lease_token = ?
+    """,
+    ("service_jobs", "status = ?, error = ?, report_json = ?"): """
+        UPDATE service_jobs
+        SET status = ?, error = ?, report_json = ?,
+            lease_token = NULL, lease_expires_at = NULL,
+            worker_id = NULL, updated_at = ?
+        WHERE id = ? AND lease_token = ?
+    """,
+}
+_LEASE_RENEW_SQL = {
+    "service_plans": """
+        UPDATE service_plans SET lease_expires_at = ?, updated_at = ?
+        WHERE id = ? AND lease_token = ? AND status = ?
+    """,
+    "service_jobs": """
+        UPDATE service_jobs SET lease_expires_at = ?, updated_at = ?
+        WHERE id = ? AND lease_token = ? AND status = ?
+    """,
+}
+
 
 class SQLiteServiceStore:
     """Own service resources while the engine owns record-level checkpoints."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._configure()
         self._migrate()
+        _secure_state_files(self.path)
 
     def _configure(self) -> None:
         with self._connection:
@@ -136,6 +178,15 @@ class SQLiteServiceStore:
                 """
             )
             self._ensure_column("service_jobs", "report_json", "TEXT")
+            rows = self._connection.execute(
+                "SELECT rowid, idempotency_key FROM service_idempotency"
+            ).fetchall()
+            for row in rows:
+                if not str(row["idempotency_key"]).startswith("sha256:"):
+                    self._connection.execute(
+                        "UPDATE service_idempotency SET idempotency_key = ? WHERE rowid = ?",
+                        (_stored_idempotency_key(row["idempotency_key"]), row["rowid"]),
+                    )
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
         columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")}
@@ -191,10 +242,15 @@ class SQLiteServiceStore:
         )
         return _profile(row)
 
-    def list_profiles(self, workspace_id: str) -> Sequence[ConnectionProfile]:
+    def list_profiles(
+        self, workspace_id: str, *, limit: int = 100, offset: int = 0
+    ) -> Sequence[ConnectionProfile]:
         rows = self._all(
-            "SELECT * FROM service_profiles WHERE workspace_id = ? ORDER BY name, id",
-            (workspace_id,),
+            """
+            SELECT * FROM service_profiles WHERE workspace_id = ?
+            ORDER BY name, id LIMIT ? OFFSET ?
+            """,
+            (workspace_id, limit, offset),
         )
         return [_profile(row) for row in rows]
 
@@ -329,7 +385,7 @@ class SQLiteServiceStore:
             assignments="status = ?, error = ?",
             values=(PlanStatus.FAILED.value, _safe_error(error)),
             event_type="plan_failed",
-            event_payload={"error": _safe_error(error)},
+            event_payload={"has_error": True},
         )
 
     def renew_plan_lease(self, plan_id: str, lease_token: str, lease_seconds: int) -> bool:
@@ -375,10 +431,15 @@ class SQLiteServiceStore:
         )
         return _job(row)
 
-    def list_jobs(self, workspace_id: str) -> Sequence[JobRecord]:
+    def list_jobs(
+        self, workspace_id: str, *, limit: int = 100, offset: int = 0
+    ) -> Sequence[JobRecord]:
         rows = self._all(
-            "SELECT * FROM service_jobs WHERE workspace_id = ? ORDER BY created_at DESC, id",
-            (workspace_id,),
+            """
+            SELECT * FROM service_jobs WHERE workspace_id = ?
+            ORDER BY created_at DESC, id LIMIT ? OFFSET ?
+            """,
+            (workspace_id, limit, offset),
         )
         return [_job(row) for row in rows]
 
@@ -473,7 +534,7 @@ class SQLiteServiceStore:
                 _json(report) if report is not None else None,
             ),
             event_type=f"job_{status.value}",
-            event_payload={"error": _safe_error(error) if error else None},
+            event_payload={"has_error": error is not None},
         )
 
     def request_job_state(
@@ -584,6 +645,7 @@ class SQLiteServiceStore:
         request: Mapping[str, Any],
     ) -> str | None:
         digest = _request_digest(request)
+        key = _stored_idempotency_key(key)
         with self._lock:
             row = self._connection.execute(
                 """
@@ -608,6 +670,7 @@ class SQLiteServiceStore:
         resource_id: str,
     ) -> str:
         digest = _request_digest(request)
+        key = _stored_idempotency_key(key)
         with self._lock, self._connection:
             try:
                 self._connection.execute(
@@ -643,22 +706,20 @@ class SQLiteServiceStore:
         event_type: str,
         event_payload: Mapping[str, Any],
     ) -> None:
-        if table not in {"service_plans", "service_jobs"}:
-            raise ValueError("invalid leased resource table")
+        try:
+            select_sql = _LEASE_SELECT_SQL[table]
+            update_sql = _LEASE_UPDATE_SQL[(table, assignments)]
+        except KeyError as error:
+            raise ValueError("invalid leased resource update") from error
         with self._lock, self._connection:
             row = self._connection.execute(
-                f"SELECT workspace_id FROM {table} WHERE id = ? AND lease_token = ?",
+                select_sql,
                 (resource_id, lease_token),
             ).fetchone()
             if row is None:
                 raise StateConflictError(f"worker lease for {resource_id} is no longer valid")
             cursor = self._connection.execute(
-                f"""
-                UPDATE {table}
-                SET {assignments}, lease_token = NULL, lease_expires_at = NULL,
-                    worker_id = NULL, updated_at = ?
-                WHERE id = ? AND lease_token = ?
-                """,
+                update_sql,
                 (*values, _utc_now(), resource_id, lease_token),
             )
             if cursor.rowcount != 1:
@@ -681,14 +742,13 @@ class SQLiteServiceStore:
         status: str,
         lease_seconds: int,
     ) -> bool:
-        if table not in {"service_plans", "service_jobs"}:
-            raise ValueError("invalid leased resource table")
+        try:
+            renew_sql = _LEASE_RENEW_SQL[table]
+        except KeyError as error:
+            raise ValueError("invalid leased resource table") from error
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                f"""
-                UPDATE {table} SET lease_expires_at = ?, updated_at = ?
-                WHERE id = ? AND lease_token = ? AND status = ?
-                """,
+                renew_sql,
                 (_future(lease_seconds), _utc_now(), resource_id, lease_token, status),
             )
         return cursor.rowcount == 1
@@ -815,6 +875,10 @@ def _request_digest(request: Mapping[str, Any]) -> str:
     return hashlib.sha256(_json(request).encode("utf-8")).hexdigest()
 
 
+def _stored_idempotency_key(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _safe_error(value: str) -> str:
     return redact_text(value).replace("\n", " ")[:1000]
 
@@ -822,9 +886,11 @@ def _safe_error(value: str) -> str:
 def to_public_dict(value: Any) -> dict[str, Any]:
     """Serialize service dataclasses for the API without exposing connection values."""
 
-    result = asdict(value)
-    if isinstance(value, ConnectionProfile):
-        result["connection"] = _redact_references(value.connection)
+    result = _redact_references(asdict(value))
+    if isinstance(value, PlanRecord) and value.error:
+        result["error"] = "planning failed; review trusted worker diagnostics"
+    if isinstance(value, JobRecord) and value.error:
+        result["error"] = "migration failed; review trusted worker diagnostics"
     for key, item in tuple(result.items()):
         if isinstance(item, enum.Enum):
             result[key] = item.value
@@ -839,3 +905,11 @@ def _redact_references(value: Any) -> Any:
     if isinstance(value, str) and value.startswith(("env:", "file:")):
         return {"secret_ref": value.split(":", 1)[0] + ":<redacted>"}
     return value
+
+
+def _secure_state_files(path: Path) -> None:
+    if os.name != "posix":
+        return
+    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+        if candidate.exists():
+            os.chmod(candidate, 0o600)

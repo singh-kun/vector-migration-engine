@@ -6,7 +6,8 @@ from typing import Any
 
 from vme.errors import ConfigurationError
 from vme.server.models import MigrationDefinition, ProfileRole
-from vme.server.secrets import SecretResolver
+from vme.server.secrets import SecretResolver, validate_secret_references
+from vme.server.security import EndpointPolicy, validate_migration_payload
 from vme.server.store import SQLiteServiceStore
 
 
@@ -14,8 +15,12 @@ def resolved_migration_settings(
     store: SQLiteServiceStore,
     migration: MigrationDefinition,
     resolver: SecretResolver,
+    *,
+    secret_values: set[str] | None = None,
+    endpoint_policy: EndpointPolicy | None = None,
 ) -> dict[str, Any]:
     specification = migration.specification
+    validate_migration_payload(specification)
     source_profile_id = _required_string(specification, "source_profile_id")
     destination_profile_id = _required_string(specification, "destination_profile_id")
     source = store.get_profile(migration.workspace_id, source_profile_id)
@@ -24,17 +29,24 @@ def resolved_migration_settings(
         raise ConfigurationError(f"profile {source.id} cannot be used as a source")
     if destination.role not in {ProfileRole.DESTINATION, ProfileRole.BOTH}:
         raise ConfigurationError(f"profile {destination.id} cannot be used as a destination")
+    validate_secret_references(source.connection)
+    validate_secret_references(destination.connection)
+    resolver.validate_references(source.connection)
+    resolver.validate_references(destination.connection)
+    if endpoint_policy is not None:
+        endpoint_policy.validate_connection(source.adapter, source.connection)
+        endpoint_policy.validate_connection(destination.adapter, destination.connection)
 
     raw: dict[str, Any] = {
         "metadata": {"name": migration.name},
         "source": {
             "adapter": source.adapter,
-            "connection": resolver.resolve(source.connection),
+            "connection": resolver.resolve(source.connection, secret_values=secret_values),
             "resource": dict(specification.get("source_resource") or {}),
         },
         "destination": {
             "adapter": destination.adapter,
-            "connection": resolver.resolve(destination.connection),
+            "connection": resolver.resolve(destination.connection, secret_values=secret_values),
             "resource": dict(specification.get("destination_resource") or {}),
         },
     }

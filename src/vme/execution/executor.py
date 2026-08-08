@@ -115,6 +115,7 @@ class MigrationExecutor:
         verifier: Verifier | None = None,
         should_stop: Callable[[], bool] | None = None,
         lease_is_valid: Callable[[], bool] | None = None,
+        error_redactor: Callable[[str], str] | None = None,
     ) -> None:
         self.source = source
         self.destination = destination
@@ -123,6 +124,7 @@ class MigrationExecutor:
         self.verifier = verifier or Verifier()
         self.should_stop = should_stop or (lambda: False)
         self.lease_is_valid = lease_is_valid or (lambda: True)
+        self.error_redactor = error_redactor or redact_text
         self._writer_slots = asyncio.Semaphore(self.options.writer_concurrency)
 
     async def run(
@@ -221,8 +223,9 @@ class MigrationExecutor:
         except MigrationStoppedError:
             raise
         except Exception as error:
-            self.state.set_status(job_id, JobStatus.FAILED, _safe_error(error))
-            raise MigrationRunError(job_id, error) from error
+            public_message = _safe_error(error, self.error_redactor)
+            self.state.set_status(job_id, JobStatus.FAILED, public_message)
+            raise MigrationRunError(job_id, error, public_message=public_message) from error
         finally:
             await asyncio.gather(
                 self.source.close(),
@@ -346,7 +349,8 @@ class MigrationExecutor:
             self.options.retry.max_delay_seconds,
             self.options.retry.base_delay_seconds * (2 ** (attempt - 1)),
         )
-        return random.uniform(0, maximum) if maximum else 0
+        # This is scheduling jitter, not a secret or security token.
+        return random.uniform(0, maximum) if maximum else 0  # nosec B311
 
 
 def _validate_for_target(record: VectorRecord, plan: MigrationPlan) -> None:
@@ -415,6 +419,6 @@ def _contains_array(value: Mapping[str, Any]) -> bool:
     return any(isinstance(item, Sequence) and not isinstance(item, str) for item in value.values())
 
 
-def _safe_error(error: BaseException) -> str:
-    text = redact_text(str(error)).replace("\n", " ")
+def _safe_error(error: BaseException, redactor: Callable[[str], str]) -> str:
+    text = redactor(str(error)).replace("\n", " ")
     return f"{type(error).__name__}: {text[:500]}"

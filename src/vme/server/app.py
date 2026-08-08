@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from vme.adapters.registry import builtin_registry
 from vme.errors import (
@@ -27,6 +28,12 @@ from vme.server.schemas import (
     PlanCreate,
 )
 from vme.server.secrets import SecretResolver, validate_secret_references
+from vme.server.security import (
+    EndpointPolicy,
+    RequestBodyLimitMiddleware,
+    SecurityHeadersMiddleware,
+    validate_migration_payload,
+)
 from vme.server.settings import ServerSettings
 from vme.server.store import SQLiteServiceStore, to_public_dict
 from vme.server.worker import ServiceWorker
@@ -43,13 +50,24 @@ def create_app(
     settings.validate()
     owns_store = store is None
     store = store or SQLiteServiceStore(settings.state_path)
-    resolver = SecretResolver(settings.allowed_secret_roots)
+    resolver = SecretResolver(
+        settings.allowed_secret_roots,
+        settings.allowed_secret_env_names,
+    )
+    endpoint_policy = EndpointPolicy(
+        allowed_adapters=settings.allowed_adapters,
+        allowed_data_roots=settings.allowed_data_roots,
+        allowed_endpoints=settings.allowed_endpoints,
+        allow_insecure_endpoints=settings.allow_insecure_endpoints,
+        allow_embedded_chroma=settings.allow_embedded_chroma,
+    )
     worker = worker or ServiceWorker(
         store=store,
         state_path=str(settings.state_path),
         resolver=resolver,
         poll_seconds=settings.worker_poll_seconds,
         lease_seconds=settings.lease_seconds,
+        endpoint_policy=endpoint_policy,
     )
     authenticator = Authenticator(settings)
 
@@ -75,7 +93,20 @@ def create_app(
         version="1.0.0a1",
         description="Capability-aware, durable vector database migrations",
         lifespan=lifespan,
+        docs_url="/docs" if settings.expose_docs else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if settings.expose_docs else None,
     )
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_bytes=settings.max_request_bytes,
+    )
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=list(settings.allowed_hosts),
+        www_redirect=False,
+    )
+    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.hsts_enabled)
     app.state.store = store
     app.state.settings = settings
     app.state.worker = worker
@@ -111,6 +142,8 @@ def create_app(
     Operator = Annotated[Actor, Depends(operator)]
     Admin = Annotated[Actor, Depends(admin)]
     IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key")]
+    PageLimit = Annotated[int, Query(ge=1, le=200)]
+    PageOffset = Annotated[int, Query(ge=0, le=1_000_000)]
 
     @app.exception_handler(ResourceNotFoundError)
     async def not_found_handler(_request: Request, error: ResourceNotFoundError) -> JSONResponse:
@@ -132,6 +165,10 @@ def create_app(
     async def validation_handler(_request: Request, _error: RequestValidationError) -> JSONResponse:
         return _problem(422, "Invalid request", "request validation failed")
 
+    @app.exception_handler(Exception)
+    async def internal_error_handler(_request: Request, _error: Exception) -> JSONResponse:
+        return _problem(500, "Internal server error", "an unexpected error occurred")
+
     @app.get("/health/live", include_in_schema=False)
     async def live() -> dict[str, str]:
         return {"status": "ok"}
@@ -146,7 +183,11 @@ def create_app(
 
     @app.get("/v1/adapters")
     async def adapters(_actor: CurrentActor) -> Mapping[str, Any]:
-        return builtin_registry().available()
+        available = builtin_registry().available()
+        allowed = set(settings.allowed_adapters)
+        return {
+            kind: [name for name in names if name in allowed] for kind, names in available.items()
+        }
 
     @app.post("/v1/connection-profiles", status_code=201)
     async def create_profile(
@@ -156,10 +197,12 @@ def create_app(
         idempotency_key: IdempotencyKey,
     ) -> dict[str, Any]:
         request = body.model_dump(mode="json")
+        validate_secret_references(body.connection)
+        resolver.validate_references(body.connection)
+        endpoint_policy.validate_connection(body.adapter, body.connection)
         existing = _existing_id(store, actor, "create-profile", idempotency_key, request)
         if existing:
             return to_public_dict(store.get_profile(actor.workspace_id, existing))
-        validate_secret_references(body.connection)
         profile = store.create_profile(
             workspace_id=actor.workspace_id,
             name=body.name,
@@ -173,8 +216,15 @@ def create_app(
         return to_public_dict(profile)
 
     @app.get("/v1/connection-profiles")
-    async def list_profiles(actor: CurrentActor) -> list[dict[str, Any]]:
-        return [to_public_dict(item) for item in store.list_profiles(actor.workspace_id)]
+    async def list_profiles(
+        actor: CurrentActor,
+        limit: PageLimit = 100,
+        offset: PageOffset = 0,
+    ) -> list[dict[str, Any]]:
+        return [
+            to_public_dict(item)
+            for item in store.list_profiles(actor.workspace_id, limit=limit, offset=offset)
+        ]
 
     @app.get("/v1/connection-profiles/{profile_id}")
     async def get_profile(profile_id: str, actor: CurrentActor) -> dict[str, Any]:
@@ -188,6 +238,7 @@ def create_app(
         idempotency_key: IdempotencyKey,
     ) -> dict[str, Any]:
         request = body.model_dump(mode="json")
+        validate_migration_payload(request)
         existing = _existing_id(store, actor, "create-migration", idempotency_key, request)
         if existing:
             return to_public_dict(store.get_migration(actor.workspace_id, existing))
@@ -252,10 +303,14 @@ def create_app(
         return _job_response(store, actor.workspace_id, job.id)
 
     @app.get("/v1/jobs")
-    async def list_jobs(actor: CurrentActor) -> list[dict[str, Any]]:
+    async def list_jobs(
+        actor: CurrentActor,
+        limit: PageLimit = 100,
+        offset: PageOffset = 0,
+    ) -> list[dict[str, Any]]:
         return [
             _job_response(store, actor.workspace_id, item.id)
-            for item in store.list_jobs(actor.workspace_id)
+            for item in store.list_jobs(actor.workspace_id, limit=limit, offset=offset)
         ]
 
     @app.get("/v1/jobs/{job_id}")

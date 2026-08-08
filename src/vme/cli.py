@@ -106,10 +106,19 @@ def main(argv: list[str] | None = None) -> int:
                 port=arguments.port or settings.port,
             )
             settings.validate()
-            uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+            uvicorn.run(
+                create_app(settings),
+                host=settings.host,
+                port=settings.port,
+                limit_concurrency=settings.max_concurrency,
+                timeout_keep_alive=settings.timeout_keep_alive,
+                proxy_headers=False,
+                server_header=False,
+            )
             return 0
         if arguments.command == "worker":
             from vme.server.secrets import SecretResolver
+            from vme.server.security import EndpointPolicy
             from vme.server.settings import ServerSettings
             from vme.server.store import SQLiteServiceStore
             from vme.server.worker import ServiceWorker
@@ -117,13 +126,24 @@ def main(argv: list[str] | None = None) -> int:
             settings = ServerSettings.from_env()
             if arguments.state:
                 settings = dataclasses.replace(settings, state_path=Path(arguments.state))
+            settings.validate(require_api_auth=False)
             store = SQLiteServiceStore(settings.state_path)
             service_worker = ServiceWorker(
                 store=store,
                 state_path=str(settings.state_path),
-                resolver=SecretResolver(settings.allowed_secret_roots),
+                resolver=SecretResolver(
+                    settings.allowed_secret_roots,
+                    settings.allowed_secret_env_names,
+                ),
                 poll_seconds=settings.worker_poll_seconds,
                 lease_seconds=settings.lease_seconds,
+                endpoint_policy=EndpointPolicy(
+                    allowed_adapters=settings.allowed_adapters,
+                    allowed_data_roots=settings.allowed_data_roots,
+                    allowed_endpoints=settings.allowed_endpoints,
+                    allow_insecure_endpoints=settings.allow_insecure_endpoints,
+                    allow_embedded_chroma=settings.allow_embedded_chroma,
+                ),
             )
             try:
                 asyncio.run(service_worker.run_forever())

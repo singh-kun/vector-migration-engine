@@ -60,8 +60,15 @@ class VerificationError(VMEError):
 class MigrationRunError(VMEError):
     """A run failed after a durable job was created."""
 
-    def __init__(self, job_id: str, cause: BaseException) -> None:
-        super().__init__(f"migration job {job_id} failed: {cause}")
+    def __init__(
+        self,
+        job_id: str,
+        cause: BaseException,
+        *,
+        public_message: str | None = None,
+    ) -> None:
+        message = public_message or f"{type(cause).__name__}: migration failed"
+        super().__init__(f"migration job {job_id} failed: {message}")
         self.job_id = job_id
         self.cause = cause
 
@@ -84,7 +91,16 @@ _SECRET_ASSIGNMENT = re.compile(
 _BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 
 
-def redact_text(value: str) -> str:
+def redact_text(value: str, secret_values: object = ()) -> str:
     """Remove common credential forms before errors reach logs or durable state."""
+
+    if isinstance(secret_values, (set, frozenset, list, tuple)):
+        candidates = sorted(
+            {str(item) for item in secret_values if isinstance(item, str) and len(item) >= 4},
+            key=len,
+            reverse=True,
+        )
+        for secret in candidates:
+            value = value.replace(secret, "<redacted>")
     value = _SECRET_ASSIGNMENT.sub(r"\1\2<redacted>", value)
     return _BEARER_TOKEN.sub("Bearer <redacted>", value)

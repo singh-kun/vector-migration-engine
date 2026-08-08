@@ -20,7 +20,8 @@ class RecordTransformer:
         elif self.mapping.id_policy is IdPolicy.STRINGIFY:
             target_id = str(record.id)
         else:
-            assert self._uuid_namespace is not None
+            if self._uuid_namespace is None:
+                raise ValueError("UUID ID mapping requires a namespace")
             target_id = str(uuid.uuid5(self._uuid_namespace, record.scoped_id.key))
 
         vectors = {
