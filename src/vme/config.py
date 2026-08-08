@@ -29,7 +29,7 @@ class MigrationSettings:
     execution: ExecutionOptions
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "MigrationSettings":
+    def from_mapping(cls, raw: Mapping[str, Any]) -> MigrationSettings:
         source = _endpoint(raw.get("source"), "source")
         destination = _endpoint(raw.get("destination"), "destination")
         metadata = raw.get("metadata") or {}
@@ -40,10 +40,7 @@ class MigrationSettings:
         vector_raw = mapping_raw.get("vectors") or {}
         vector_names: dict[str, str] = {}
         for source_name, target in vector_raw.items():
-            if isinstance(target, Mapping):
-                target_name = target.get("to", source_name)
-            else:
-                target_name = target
+            target_name = target.get("to", source_name) if isinstance(target, Mapping) else target
             vector_names[str(source_name)] = str(target_name)
         try:
             mapping = MappingOptions(

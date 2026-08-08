@@ -22,8 +22,8 @@ from vme.domain.models import (
     Normalization,
     ReadBatch,
     RecordScope,
-    ScoreOrder,
     ScopedId,
+    ScoreOrder,
     SourcePartition,
     VectorFieldSpec,
     VectorKind,
@@ -48,9 +48,7 @@ class ChromaAdapter(SourceAdapter, DestinationAdapter):
             source=True,
             destination=True,
             vector_kinds=frozenset({VectorKind.DENSE}),
-            metrics=frozenset(
-                {MetricKind.COSINE, MetricKind.DOT, MetricKind.SQUARED_EUCLIDEAN}
-            ),
+            metrics=frozenset({MetricKind.COSINE, MetricKind.DOT, MetricKind.SQUARED_EUCLIDEAN}),
             id_kinds=frozenset({IdKind.STRING}),
             metric_specs={
                 MetricKind.COSINE: _chroma_metric("cosine"),
@@ -79,9 +77,7 @@ class ChromaAdapter(SourceAdapter, DestinationAdapter):
             include=["embeddings", "documents", "metadatas"],
         )
         embeddings = _result_list(sample, "embeddings")
-        dimension = (
-            len(embeddings[0]) if len(embeddings) > 0 else self.config.get("dimension")
-        )
+        dimension = len(embeddings[0]) if len(embeddings) > 0 else self.config.get("dimension")
         metric = self._discover_metric(collection)
         field = VectorFieldSpec(
             "default",

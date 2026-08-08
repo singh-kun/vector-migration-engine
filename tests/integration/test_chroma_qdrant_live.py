@@ -9,9 +9,13 @@ from importlib.metadata import version
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
-from vme.config import MigrationSettings
-from vme.service import run_migration
+from vme.server.app import create_app
+from vme.server.secrets import SecretResolver
+from vme.server.settings import ServerSettings
+from vme.server.store import SQLiteServiceStore
+from vme.server.worker import ServiceWorker
 
 pytestmark = pytest.mark.integration
 
@@ -158,9 +162,7 @@ class LiveChromaToQdrantTest(unittest.TestCase):
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
         from qdrant_client import QdrantClient
 
-        with tempfile.TemporaryDirectory(
-            prefix="vme-live-", ignore_cleanup_errors=True
-        ) as root:
+        with tempfile.TemporaryDirectory(prefix="vme-live-", ignore_cleanup_errors=True) as root:
             root_path = Path(root)
             chroma_path = root_path / "chroma"
             qdrant_path = root_path / "qdrant"
@@ -186,36 +188,100 @@ class LiveChromaToQdrantTest(unittest.TestCase):
                 ],
             )
 
-            settings = MigrationSettings.from_mapping(
-                {
-                    "metadata": {"name": "live-chroma-to-qdrant"},
-                    "source": {
-                        "adapter": "chroma",
-                        "connection": {"path": str(chroma_path)},
-                        "resource": {"collection": source_name, "metric": "cosine"},
-                    },
-                    "destination": {
-                        "adapter": "qdrant",
-                        "connection": {"path": str(qdrant_path)},
-                        "resource": {"collection": target_name},
-                    },
-                    "mapping": {
-                        "ids": {
-                            "policy": "deterministic_uuid",
-                            "namespace": "60f5f0b8-6574-4b98-9f55-e365efa51e20",
-                        }
-                    },
-                    "execution": {
-                        "batch": {"max_records": 7, "max_bytes": 1048576},
-                        "concurrency": {"partitions": 1, "writers": 2},
-                    },
-                    "verification": {"sample": {"records": len(CORPUS)}},
-                }
+            state_path = root_path / "service-state.sqlite3"
+            store = SQLiteServiceStore(state_path)
+            worker = ServiceWorker(
+                store=store,
+                state_path=str(state_path),
+                resolver=SecretResolver(),
+                lease_seconds=30,
+                worker_id="live-integration-worker",
             )
-
-            summary = asyncio.run(
-                run_migration(settings, state_path=root_path / "migration-state.sqlite3")
+            service_settings = ServerSettings(
+                state_path=state_path,
+                auth_mode="none",
+                run_worker=False,
             )
+            try:
+                with TestClient(create_app(service_settings, store=store, worker=worker)) as client:
+                    source_profile = _post(
+                        client,
+                        "/v1/connection-profiles",
+                        "live-source-profile",
+                        {
+                            "name": "live-chroma",
+                            "adapter": "chroma",
+                            "role": "source",
+                            "connection": {"path": str(chroma_path)},
+                        },
+                        201,
+                    )
+                    destination_profile = _post(
+                        client,
+                        "/v1/connection-profiles",
+                        "live-destination-profile",
+                        {
+                            "name": "live-qdrant",
+                            "adapter": "qdrant",
+                            "role": "destination",
+                            "connection": {"path": str(qdrant_path)},
+                        },
+                        201,
+                    )
+                    migration = _post(
+                        client,
+                        "/v1/migrations",
+                        "live-migration-definition",
+                        {
+                            "name": "live-chroma-to-qdrant",
+                            "source_profile_id": source_profile["id"],
+                            "destination_profile_id": destination_profile["id"],
+                            "source_resource": {
+                                "collection": source_name,
+                                "metric": "cosine",
+                            },
+                            "destination_resource": {"collection": target_name},
+                            "mapping": {
+                                "ids": {
+                                    "policy": "deterministic_uuid",
+                                    "namespace": "60f5f0b8-6574-4b98-9f55-e365efa51e20",
+                                }
+                            },
+                            "execution": {
+                                "batch": {"max_records": 7, "max_bytes": 1048576},
+                                "concurrency": {"partitions": 1, "writers": 2},
+                            },
+                            "verification": {"sample": {"records": len(CORPUS)}},
+                        },
+                        201,
+                    )
+                    plan = _post(
+                        client,
+                        "/v1/plans",
+                        "live-plan-request",
+                        {"migration_id": migration["id"]},
+                        202,
+                    )
+                    self.assertTrue(asyncio.run(worker.run_once()))
+                    planned = client.get(f"/v1/plans/{plan['id']}")
+                    self.assertEqual(planned.status_code, 200, planned.text)
+                    self.assertEqual(planned.json()["status"], "ready")
+                    job = _post(
+                        client,
+                        "/v1/jobs",
+                        "live-job-request",
+                        {"plan_id": plan["id"]},
+                        202,
+                    )
+                    self.assertTrue(asyncio.run(worker.run_once()))
+                    completed = client.get(f"/v1/jobs/{job['id']}")
+                    self.assertEqual(completed.status_code, 200, completed.text)
+                    self.assertEqual(completed.json()["status"], "completed")
+                    report_response = client.get(f"/v1/jobs/{job['id']}/report")
+                    self.assertEqual(report_response.status_code, 200, report_response.text)
+                    summary = report_response.json()
+            finally:
+                store.close()
             qdrant = QdrantClient(path=str(qdrant_path))
             try:
                 destination_count = qdrant.count(target_name, exact=True).count
@@ -223,9 +289,9 @@ class LiveChromaToQdrantTest(unittest.TestCase):
                 overlaps: list[float] = []
                 top_matches: list[dict[str, str]] = []
                 for (query, expected), vector in zip(QUERIES, query_vectors, strict=True):
-                    chroma_ids = source.query(
-                        query_embeddings=[vector], n_results=5, include=[]
-                    )["ids"][0]
+                    chroma_ids = source.query(query_embeddings=[vector], n_results=5, include=[])[
+                        "ids"
+                    ][0]
                     qdrant_points = qdrant.query_points(
                         collection_name=target_name,
                         query=vector,
@@ -253,20 +319,20 @@ class LiveChromaToQdrantTest(unittest.TestCase):
                     "qdrant_client_version": version("qdrant-client"),
                     "source_records": source.count(),
                     "destination_records": destination_count,
-                    "records_written": summary.records_written,
-                    "sample_digest_mismatches": summary.verification.mismatched_samples,
+                    "records_written": summary["records_written"],
+                    "sample_digest_mismatches": summary["verification"]["mismatched_samples"],
                     "mean_top5_overlap": sum(overlaps) / len(overlaps),
                     "minimum_top5_overlap": min(overlaps),
                     "queries": top_matches,
                 }
                 print("\nVME_LIVE_INTEGRATION=" + json.dumps(report, sort_keys=True))
 
-                self.assertEqual(summary.status.value, "completed")
+                self.assertEqual(summary["status"], "completed")
                 self.assertEqual(source.count(), len(CORPUS))
                 self.assertEqual(destination_count, len(CORPUS))
-                self.assertEqual(summary.records_written, len(CORPUS))
-                self.assertEqual(summary.verification.missing_samples, 0)
-                self.assertEqual(summary.verification.mismatched_samples, 0)
+                self.assertEqual(summary["records_written"], len(CORPUS))
+                self.assertEqual(summary["verification"]["missing_samples"], 0)
+                self.assertEqual(summary["verification"]["mismatched_samples"], 0)
                 self.assertGreaterEqual(min(overlaps), 0.8)
             finally:
                 qdrant.close()
@@ -277,6 +343,23 @@ def _as_list(vector: object) -> list[float]:
     tolist = getattr(vector, "tolist", None)
     values = tolist() if callable(tolist) else vector
     return [float(value) for value in values]
+
+
+def _post(
+    client: TestClient,
+    path: str,
+    idempotency_key: str,
+    body: dict[str, object],
+    expected_status: int,
+) -> dict[str, object]:
+    response = client.post(
+        path,
+        headers={"Idempotency-Key": idempotency_key},
+        json=body,
+    )
+    if response.status_code != expected_status:
+        raise AssertionError(f"{path} returned {response.status_code}: {response.text}")
+    return response.json()
 
 
 if __name__ == "__main__":

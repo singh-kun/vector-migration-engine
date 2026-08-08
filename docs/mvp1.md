@@ -18,6 +18,13 @@ MVP1 implements the first production-oriented slice of the [v1 architecture](des
 - Pre-copy exact source count capture and post-copy exact destination count verification.
 - Bounded deterministic record sampling with destination read-back and canonical SHA-256 digests.
 - CLI commands for adapter discovery, planning, running, resuming, and status.
+- REST/OpenAPI resources for reusable connection profiles, migration definitions, immutable plans,
+  durable jobs, controls, events, health, progress, and reports.
+- SQLite service queues with worker leases, heartbeats, recovery state, and stale-worker fencing at
+  checkpoint boundaries.
+- Local bearer-token and OIDC workspace-role authentication.
+- Environment/file secret references with plaintext-credential rejection and response redaction.
+- A non-root OCI image and Compose profile with independently restartable API and worker services.
 - Buildable Python wheel with optional provider dependency groups.
 
 ## Safety semantics
@@ -73,9 +80,10 @@ service is required for this embedded gate.
 
 ## Next implementation slice
 
-1. Add Docker-backed Chroma and Qdrant integration tests pinned to supported SDK/server versions.
-2. Move semantic top-k overlap from the release gate into a configurable migration verifier and
+1. Add a PostgreSQL service/checkpoint store with replica-safe idempotency and HA lease tests.
+2. Add endpoint egress/SSRF policy, metrics export, and published API client commands/SDKs.
+3. Add Docker-backed Chroma and Qdrant integration tests pinned to supported SDK/server versions.
+4. Move semantic top-k overlap from the release gate into a configurable migration verifier and
    add full-dataset bucket digests.
-3. Add OpenTelemetry-compatible metrics/events and a structured Markdown/JSON final report.
-4. Implement Weaviate and the versioned FAISS bundle adapters.
-5. Add target alias cutover where the provider supports it.
+5. Implement Weaviate and the versioned FAISS bundle adapters.
+6. Add target alias cutover where the provider supports it.

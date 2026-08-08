@@ -13,6 +13,7 @@ class RecordTransformer:
         self._uuid_namespace = (
             uuid.UUID(mapping.uuid_namespace) if mapping.uuid_namespace is not None else None
         )
+
     def transform(self, record: VectorRecord) -> VectorRecord:
         if self.mapping.id_policy is IdPolicy.PRESERVE:
             target_id = record.id

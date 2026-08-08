@@ -49,6 +49,10 @@ class StateConflictError(VMEError):
     """Durable state does not match the requested migration."""
 
 
+class ResourceNotFoundError(VMEError):
+    """A requested service or migration resource does not exist."""
+
+
 class VerificationError(VMEError):
     """The destination failed an enabled verification check."""
 
@@ -60,6 +64,18 @@ class MigrationRunError(VMEError):
         super().__init__(f"migration job {job_id} failed: {cause}")
         self.job_id = job_id
         self.cause = cause
+
+
+class MigrationStoppedError(VMEError):
+    """A run stopped cooperatively after its last durable checkpoint."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(f"migration job {job_id} stopped at a durable checkpoint")
+        self.job_id = job_id
+
+
+class WorkerLeaseLostError(VMEError):
+    """A stale worker must stop before it can advance durable migration state."""
 
 
 _SECRET_ASSIGNMENT = re.compile(

@@ -22,8 +22,8 @@ from vme.domain.models import (
     Normalization,
     ReadBatch,
     RecordScope,
-    ScoreOrder,
     ScopedId,
+    ScoreOrder,
     SourcePartition,
     VectorFieldSpec,
     VectorKind,
@@ -80,10 +80,7 @@ class MemorySourceAdapter(SourceAdapter):
         return self.spec
 
     async def partitions(self) -> Sequence[SourcePartition]:
-        return [
-            SourcePartition(key=key, scope=self._scopes[key])
-            for key in sorted(self._records)
-        ]
+        return [SourcePartition(key=key, scope=self._scopes[key]) for key in sorted(self._records)]
 
     async def read_batch(
         self,

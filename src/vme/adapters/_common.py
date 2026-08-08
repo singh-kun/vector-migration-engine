@@ -32,9 +32,7 @@ def classify_sdk_error(error: Exception) -> AdapterError:
     text = str(error).lower()
     if status == 429 or "too many requests" in text or "rate limit" in text:
         retry_after = getattr(error, "retry_after", None)
-        return ThrottledAdapterError(
-            redact_text(str(error)), retry_after_seconds=retry_after
-        )
+        return ThrottledAdapterError(redact_text(str(error)), retry_after_seconds=retry_after)
     if status in {408, 425, 500, 502, 503, 504} or any(
         marker in text
         for marker in ("timed out", "timeout", "connection reset", "temporarily unavailable")

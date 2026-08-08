@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from vme.adapters.registry import AdapterRegistry, builtin_registry
 from vme.config import MigrationSettings
 from vme.domain.models import MigrationPlan, to_jsonable
-from vme.execution.executor import MigrationExecutor, RunSummary
 from vme.errors import PlanRejectedError
+from vme.execution.executor import MigrationExecutor, RunSummary
 from vme.planning.planner import MigrationPlanner
 from vme.state.sqlite import SQLiteStateStore
 
@@ -49,6 +50,9 @@ async def run_migration(
     state_path: str | Path,
     expected_plan_fingerprint: str | None = None,
     resume_job_id: str | None = None,
+    job_id: str | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    lease_is_valid: Callable[[], bool] | None = None,
     registry: AdapterRegistry | None = None,
 ) -> RunSummary:
     registry = registry or builtin_registry()
@@ -84,9 +88,16 @@ async def run_migration(
                 destination=destination,
                 state=state,
                 options=settings.execution,
+                should_stop=should_stop,
+                lease_is_valid=lease_is_valid,
             )
             executor_started = True
-            return await executor.run(plan, job_id=resume_job_id)
+            effective_job_id = resume_job_id or job_id
+            return await executor.run(
+                plan,
+                job_id=effective_job_id,
+                resume=resume_job_id is not None,
+            )
         finally:
             state.close()
     finally:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from vme.adapters.base import DestinationAdapter
 from vme.domain.models import CountQuality, RecordScope
-from vme.state.sqlite import SQLiteStateStore
+from vme.state.base import StateStore
 from vme.verification.digests import record_digest
 
 
@@ -38,7 +38,7 @@ class Verifier:
         expected_count: int,
         scopes: Sequence[RecordScope],
         destination: DestinationAdapter,
-        state: SQLiteStateStore,
+        state: StateStore,
     ) -> VerificationResult:
         unique_scopes = {scope.key: scope for scope in scopes}
         total = 0

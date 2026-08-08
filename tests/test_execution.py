@@ -4,15 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.helpers import records, spec
 from vme.adapters.memory import MemoryDestinationAdapter, MemorySourceAdapter
 from vme.domain.models import JobStatus, ReadBatch
-from vme.errors import MigrationRunError
+from vme.errors import MigrationRunError, MigrationStoppedError
 from vme.execution.executor import ExecutionOptions, MigrationExecutor, RetryPolicy
 from vme.planning.planner import MigrationPlanner
 from vme.state.sqlite import SQLiteStateStore
 from vme.verification.verifier import Verifier
-
-from tests.helpers import records, spec
 
 
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
@@ -135,6 +134,38 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
                 options=options,
             ).run(plan)
         self.assertIn("only 1 records were transferred", str(raised.exception))
+
+    async def test_cooperative_stop_occurs_after_a_durable_checkpoint(self) -> None:
+        source, destination, plan, options = await self._components(5, batch=2)
+
+        def should_stop() -> bool:
+            return destination.write_calls >= 1
+
+        with self.assertRaises(MigrationStoppedError) as raised:
+            await MigrationExecutor(
+                source=source,
+                destination=destination,
+                state=self.state,
+                options=options,
+                should_stop=should_stop,
+            ).run(plan)
+        snapshot = self.state.get_job(raised.exception.job_id)
+        self.assertEqual(snapshot.status, JobStatus.STOPPED)
+        self.assertEqual(snapshot.records_written, 2)
+
+    async def test_lost_worker_lease_cannot_advance_checkpoint(self) -> None:
+        source, destination, plan, options = await self._components(3, batch=3)
+        with self.assertRaises(MigrationRunError) as raised:
+            await MigrationExecutor(
+                source=source,
+                destination=destination,
+                state=self.state,
+                options=options,
+                lease_is_valid=lambda: destination.write_calls == 0,
+            ).run(plan)
+        snapshot = self.state.get_job(raised.exception.job_id)
+        self.assertEqual(snapshot.records_written, 0)
+        self.assertEqual(len(destination.records), 3)
 
 
 if __name__ == "__main__":

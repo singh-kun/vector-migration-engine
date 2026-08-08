@@ -1,5 +1,12 @@
 """Durable job state."""
 
-from .sqlite import JobSnapshot, PartitionSnapshot, SampleExpectation, SQLiteStateStore
+from .base import JobSnapshot, PartitionSnapshot, SampleExpectation, StateStore
+from .sqlite import SQLiteStateStore
 
-__all__ = ["JobSnapshot", "PartitionSnapshot", "SampleExpectation", "SQLiteStateStore"]
+__all__ = [
+    "JobSnapshot",
+    "PartitionSnapshot",
+    "SampleExpectation",
+    "SQLiteStateStore",
+    "StateStore",
+]

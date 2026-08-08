@@ -23,8 +23,8 @@ from vme.domain.models import (
     Normalization,
     ReadBatch,
     RecordScope,
-    ScoreOrder,
     ScopedId,
+    ScoreOrder,
     SourcePartition,
     VectorFieldSpec,
     VectorKind,
@@ -162,11 +162,7 @@ class QdrantAdapter(SourceAdapter, DestinationAdapter):
             )
             for name, field in plan.target.vector_fields.items()
         }
-        vectors_config: Any
-        if self._target_named:
-            vectors_config = vector_params
-        else:
-            vectors_config = vector_params["default"]
+        vectors_config: Any = vector_params if self._target_named else vector_params["default"]
         await sdk_call(
             client.create_collection,
             collection_name=self.collection_name,
@@ -257,10 +253,7 @@ class QdrantAdapter(SourceAdapter, DestinationAdapter):
 
     def _fields_from_config(self, config: Any) -> dict[str, VectorFieldSpec]:
         if isinstance(config, Mapping):
-            return {
-                str(name): _qdrant_field(str(name), params)
-                for name, params in config.items()
-            }
+            return {str(name): _qdrant_field(str(name), params) for name, params in config.items()}
         return {"default": _qdrant_field("default", config)}
 
     def _point_to_record(self, point: Any) -> VectorRecord:
@@ -280,8 +273,8 @@ class QdrantAdapter(SourceAdapter, DestinationAdapter):
 
 
 def _qdrant_field(name: str, params: Any) -> VectorFieldSpec:
-    size = int(getattr(params, "size"))
-    distance = getattr(params, "distance")
+    size = int(params.size)
+    distance = params.distance
     metric = _qdrant_metric(distance)
     datatype = getattr(params, "datatype", None)
     dtype = str(getattr(datatype, "value", datatype) or "float32").lower()

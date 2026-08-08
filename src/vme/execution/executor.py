@@ -28,15 +28,17 @@ from vme.domain.models import (
 from vme.errors import (
     FatalAdapterError,
     MigrationRunError,
+    MigrationStoppedError,
     PlanRejectedError,
     RecordValidationError,
     ThrottledAdapterError,
     TransientAdapterError,
     VerificationError,
+    WorkerLeaseLostError,
     redact_text,
 )
 from vme.execution.transforms import RecordTransformer
-from vme.state.sqlite import SQLiteStateStore
+from vme.state.base import StateStore
 from vme.verification.digests import record_digest
 from vme.verification.verifier import VerificationResult, Verifier
 
@@ -108,18 +110,28 @@ class MigrationExecutor:
         *,
         source: SourceAdapter,
         destination: DestinationAdapter,
-        state: SQLiteStateStore,
+        state: StateStore,
         options: ExecutionOptions | None = None,
         verifier: Verifier | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        lease_is_valid: Callable[[], bool] | None = None,
     ) -> None:
         self.source = source
         self.destination = destination
         self.state = state
         self.options = options or ExecutionOptions()
         self.verifier = verifier or Verifier()
+        self.should_stop = should_stop or (lambda: False)
+        self.lease_is_valid = lease_is_valid or (lambda: True)
         self._writer_slots = asyncio.Semaphore(self.options.writer_concurrency)
 
-    async def run(self, plan: MigrationPlan, *, job_id: str | None = None) -> RunSummary:
+    async def run(
+        self,
+        plan: MigrationPlan,
+        *,
+        job_id: str | None = None,
+        resume: bool | None = None,
+    ) -> RunSummary:
         if not plan.executable:
             errors = "; ".join(
                 f"{finding.code}: {finding.message}"
@@ -128,9 +140,11 @@ class MigrationExecutor:
             )
             raise PlanRejectedError(errors)
 
-        resuming = job_id is not None
+        resuming = (job_id is not None) if resume is None else resume
         if job_id is None:
             job_id = self.state.create_job(plan)
+        elif not resuming:
+            self.state.create_job(plan, job_id=job_id)
         else:
             self.state.assert_resume(job_id, plan)
 
@@ -147,11 +161,23 @@ class MigrationExecutor:
             self.state.set_status(job_id, JobStatus.COPYING)
             partition_slots = asyncio.Semaphore(self.options.partition_concurrency)
 
-            async def migrate_partition(partition: Any) -> None:
+            async def migrate_partition(partition: Any) -> bool:
                 async with partition_slots:
-                    await self._migrate_partition(job_id, plan, partition)
+                    return await self._migrate_partition(job_id, plan, partition)
 
-            await asyncio.gather(*(migrate_partition(partition) for partition in partitions))
+            outcomes = await asyncio.gather(
+                *(migrate_partition(partition) for partition in partitions),
+                return_exceptions=True,
+            )
+            failure = next(
+                (outcome for outcome in outcomes if isinstance(outcome, BaseException)),
+                None,
+            )
+            if failure is not None:
+                raise failure
+            if not all(outcome is True for outcome in outcomes):
+                self.state.set_status(job_id, JobStatus.STOPPED)
+                raise MigrationStoppedError(job_id)
             await self.destination.finalize()
             self.state.set_status(job_id, JobStatus.VERIFYING)
 
@@ -192,6 +218,8 @@ class MigrationExecutor:
         except asyncio.CancelledError:
             self.state.set_status(job_id, JobStatus.FAILED, "migration cancelled")
             raise
+        except MigrationStoppedError:
+            raise
         except Exception as error:
             self.state.set_status(job_id, JobStatus.FAILED, _safe_error(error))
             raise MigrationRunError(job_id, error) from error
@@ -210,10 +238,10 @@ class MigrationExecutor:
             return None
         return sum(int(result.value) for result in results if result.value is not None)
 
-    async def _migrate_partition(self, job_id: str, plan: MigrationPlan, partition: Any) -> None:
+    async def _migrate_partition(self, job_id: str, plan: MigrationPlan, partition: Any) -> bool:
         snapshot = self.state.get_partition(job_id, partition.key)
         if snapshot.exhausted:
-            return
+            return True
 
         transformer = RecordTransformer(plan.mapping)
         maximum_records = min(
@@ -234,8 +262,12 @@ class MigrationExecutor:
         cursor = snapshot.cursor
         exhausted = snapshot.exhausted
         while not exhausted:
+            if self.should_stop():
+                return False
+            if not self.lease_is_valid():
+                raise WorkerLeaseLostError("worker lease expired before reading the next batch")
             read = await self._retry(
-                lambda: self.source.read_batch(
+                lambda cursor=cursor: self.source.read_batch(
                     partition,
                     cursor,
                     BatchLimit(controller.current, maximum_bytes),
@@ -252,7 +284,9 @@ class MigrationExecutor:
             started = time.monotonic()
             if transformed:
                 async with self._writer_slots:
-                    result = await self._retry(lambda: self.destination.write_batch(transformed))
+                    result = await self._retry(
+                        lambda transformed=transformed: self.destination.write_batch(transformed)
+                    )
                 expected = {record.scoped_id.key for record in transformed}
                 accepted = {item.key for item in result.accepted}
                 if accepted != expected or len(result.accepted) != len(transformed):
@@ -270,6 +304,10 @@ class MigrationExecutor:
                 )
                 for record in transformed
             ]
+            if not self.lease_is_valid():
+                raise WorkerLeaseLostError(
+                    "worker lease expired after destination write and before checkpoint"
+                )
             self.state.commit_batch(
                 job_id=job_id,
                 partition_key=partition.key,
@@ -282,6 +320,9 @@ class MigrationExecutor:
             )
             cursor = read.next_cursor
             exhausted = read.exhausted
+            if self.should_stop() and not exhausted:
+                return False
+        return True
 
     async def _retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         for attempt in range(1, self.options.retry.max_attempts + 1):
@@ -328,9 +369,8 @@ def _validate_for_target(record: VectorRecord, plan: MigrationPlan) -> None:
                 f"expected {spec.dimension}"
             )
     _validate_id(record, plan.target.id_kind)
-    if (
-        not plan.destination_capabilities.nested_metadata
-        and _contains_nested_mapping(record.metadata)
+    if not plan.destination_capabilities.nested_metadata and _contains_nested_mapping(
+        record.metadata
     ):
         raise RecordValidationError(
             f"record {record.id!r} contains nested metadata unsupported by destination"

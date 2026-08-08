@@ -1,0 +1,36 @@
+services:
+  vme-api:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      VME_AUTH_MODE: token
+      VME_API_TOKEN: ${VME_API_TOKEN:?set VME_API_TOKEN}
+      VME_RUN_WORKER: "false"
+    volumes:
+      - vme-state:/var/lib/vme
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  vme-worker:
+    build: .
+    command: ["worker"]
+    environment:
+      VME_STATE_PATH: /var/lib/vme/service.sqlite3
+    volumes:
+      - vme-state:/var/lib/vme
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      disable: true
+
+volumes:
+  vme-state:

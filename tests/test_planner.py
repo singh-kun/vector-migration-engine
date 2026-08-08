@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
+from tests.helpers import records, spec
 from vme.adapters.chroma import ChromaAdapter
 from vme.adapters.memory import MemorySourceAdapter
 from vme.adapters.qdrant import QdrantAdapter
@@ -19,8 +20,6 @@ from vme.domain.models import (
     VectorKind,
 )
 from vme.planning.planner import MigrationPlanner
-
-from tests.helpers import records, spec
 
 
 class PlannerTests(unittest.TestCase):
@@ -61,11 +60,7 @@ class PlannerTests(unittest.TestCase):
         )
         source_spec = CollectionSpec(
             "source",
-            {
-                "default": VectorFieldSpec(
-                    "default", VectorKind.DENSE, 3, "float32", metric
-                )
-            },
+            {"default": VectorFieldSpec("default", VectorKind.DENSE, 3, "float32", metric)},
             IdKind.STRING,
         )
         mapping = MappingOptions(
@@ -74,9 +69,7 @@ class PlannerTests(unittest.TestCase):
         )
         plan = MigrationPlanner().build(
             source=source_spec,
-            source_capabilities=asyncio.run(
-                ChromaAdapter({"collection": "source"}).probe()
-            ),
+            source_capabilities=asyncio.run(ChromaAdapter({"collection": "source"}).probe()),
             destination_capabilities=asyncio.run(self.qdrant.probe()),
             target_name="target",
             mapping=mapping,

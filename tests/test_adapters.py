@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from tests.helpers import records, spec
 from vme.adapters.chroma import ChromaAdapter
 from vme.adapters.memory import MemorySourceAdapter
 from vme.adapters.qdrant import QdrantAdapter
@@ -18,8 +19,6 @@ from vme.domain.models import (
 from vme.execution.transforms import RecordTransformer
 from vme.planning.planner import MigrationPlanner
 from vme.verification.digests import record_digest
-
-from tests.helpers import records, spec
 
 
 class AmbiguousSequence(list):

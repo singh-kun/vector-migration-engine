@@ -7,38 +7,13 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from vme.domain.models import JobStatus, MigrationPlan, RecordScope, ScopedId, to_jsonable
 from vme.errors import StateConflictError
-
-
-@dataclass(frozen=True, slots=True)
-class JobSnapshot:
-    job_id: str
-    fingerprint: str
-    status: JobStatus
-    records_written: int
-    bytes_written: int
-    batches_written: int
-    expected_records: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class PartitionSnapshot:
-    key: str
-    cursor: Any | None
-    exhausted: bool
-    records_written: int
-
-
-@dataclass(frozen=True, slots=True)
-class SampleExpectation:
-    scoped_id: ScopedId
-    expected_digest: str
+from vme.state.base import JobSnapshot, PartitionSnapshot, SampleExpectation
 
 
 class SQLiteStateStore:
@@ -113,14 +88,12 @@ class SQLiteStateStore:
             self._ensure_column("jobs", "expected_records", "INTEGER")
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
-        columns = {
-            row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")
-        }
+        columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
-    def create_job(self, plan: MigrationPlan) -> str:
-        job_id = str(uuid.uuid4())
+    def create_job(self, plan: MigrationPlan, *, job_id: str | None = None) -> str:
+        job_id = job_id or str(uuid.uuid4())
         now = _utc_now()
         plan_json = json.dumps(to_jsonable(plan), sort_keys=True, separators=(",", ":"))
         with self._lock, self._connection:

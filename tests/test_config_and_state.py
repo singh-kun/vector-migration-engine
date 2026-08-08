@@ -6,14 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.helpers import records, spec
 from vme.adapters.memory import MemoryDestinationAdapter, MemorySourceAdapter
 from vme.config import MigrationSettings, load_config
 from vme.domain.models import IdPolicy
 from vme.errors import ConfigurationError, StateConflictError
 from vme.planning.planner import MigrationPlanner
 from vme.state.sqlite import SQLiteStateStore
-
-from tests.helpers import records, spec
 
 
 class ConfigTests(unittest.TestCase):

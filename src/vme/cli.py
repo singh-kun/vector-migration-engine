@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -37,6 +38,14 @@ def parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show durable migration job state")
     status.add_argument("job_id")
     status.add_argument("--state", default=".vme/state.sqlite3")
+
+    serve = commands.add_parser("serve", help="run the self-hosted REST API and worker")
+    serve.add_argument("--state", default=None, help="service/checkpoint SQLite path")
+    serve.add_argument("--host", default=None)
+    serve.add_argument("--port", type=int, default=None)
+
+    worker = commands.add_parser("worker", help="run a standalone migration worker")
+    worker.add_argument("--state", default=None, help="service/checkpoint SQLite path")
     return root
 
 
@@ -78,6 +87,48 @@ def main(argv: list[str] | None = None) -> int:
                 _print_json(to_jsonable(state.get_job(arguments.job_id)))
             finally:
                 state.close()
+            return 0
+        if arguments.command == "serve":
+            from vme.server.app import create_app
+            from vme.server.settings import ServerSettings
+
+            try:
+                import uvicorn
+            except ImportError as error:
+                raise VMEError(
+                    "service mode requires `pip install vector-migration-engine[server]`"
+                ) from error
+            settings = ServerSettings.from_env()
+            settings = dataclasses.replace(
+                settings,
+                state_path=Path(arguments.state) if arguments.state else settings.state_path,
+                host=arguments.host or settings.host,
+                port=arguments.port or settings.port,
+            )
+            settings.validate()
+            uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+            return 0
+        if arguments.command == "worker":
+            from vme.server.secrets import SecretResolver
+            from vme.server.settings import ServerSettings
+            from vme.server.store import SQLiteServiceStore
+            from vme.server.worker import ServiceWorker
+
+            settings = ServerSettings.from_env()
+            if arguments.state:
+                settings = dataclasses.replace(settings, state_path=Path(arguments.state))
+            store = SQLiteServiceStore(settings.state_path)
+            service_worker = ServiceWorker(
+                store=store,
+                state_path=str(settings.state_path),
+                resolver=SecretResolver(settings.allowed_secret_roots),
+                poll_seconds=settings.worker_poll_seconds,
+                lease_seconds=settings.lease_seconds,
+            )
+            try:
+                asyncio.run(service_worker.run_forever())
+            finally:
+                store.close()
             return 0
     except (VMEError, ValueError, OSError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)

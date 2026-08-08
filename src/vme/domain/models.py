@@ -20,14 +20,14 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 ExternalId: TypeAlias = str | int
 
 
-class VectorKind(str, enum.Enum):
+class VectorKind(enum.StrEnum):
     DENSE = "dense"
     SPARSE = "sparse"
     BINARY = "binary"
     MULTI = "multi"
 
 
-class MetricKind(str, enum.Enum):
+class MetricKind(enum.StrEnum):
     COSINE = "cosine"
     DOT = "dot"
     EUCLIDEAN = "euclidean"
@@ -39,46 +39,49 @@ class MetricKind(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-class ScoreOrder(str, enum.Enum):
+class ScoreOrder(enum.StrEnum):
     HIGHER_IS_BETTER = "higher_is_better"
     LOWER_IS_BETTER = "lower_is_better"
 
 
-class Normalization(str, enum.Enum):
+class Normalization(enum.StrEnum):
     REQUIRED = "required"
     AUTOMATIC = "automatic"
     NONE = "none"
     UNKNOWN = "unknown"
 
 
-class IdKind(str, enum.Enum):
+class IdKind(enum.StrEnum):
     STRING = "string"
     INTEGER = "integer"
     UUID = "uuid"
 
 
-class FindingSeverity(str, enum.Enum):
+class FindingSeverity(enum.StrEnum):
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
 
 
-class JobStatus(str, enum.Enum):
+class JobStatus(enum.StrEnum):
+    QUEUED = "queued"
     PLANNED = "planned"
     PREPARED = "prepared"
     COPYING = "copying"
     VERIFYING = "verifying"
+    STOPPED = "stopped"
+    CANCELLED = "cancelled"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
-class CountQuality(str, enum.Enum):
+class CountQuality(enum.StrEnum):
     EXACT = "exact"
     APPROXIMATE = "approximate"
     UNKNOWN = "unknown"
 
 
-class IdPolicy(str, enum.Enum):
+class IdPolicy(enum.StrEnum):
     PRESERVE = "preserve"
     STRINGIFY = "stringify"
     DETERMINISTIC_UUID = "deterministic_uuid"
