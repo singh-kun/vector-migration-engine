@@ -79,7 +79,9 @@ class ChromaAdapter(SourceAdapter, DestinationAdapter):
             include=["embeddings", "documents", "metadatas"],
         )
         embeddings = _result_list(sample, "embeddings")
-        dimension = len(embeddings[0]) if embeddings else self.config.get("dimension")
+        dimension = (
+            len(embeddings[0]) if len(embeddings) > 0 else self.config.get("dimension")
+        )
         metric = self._discover_metric(collection)
         field = VectorFieldSpec(
             "default",

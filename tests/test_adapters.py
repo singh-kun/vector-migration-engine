@@ -22,6 +22,13 @@ from vme.verification.digests import record_digest
 from tests.helpers import records, spec
 
 
+class AmbiguousSequence(list):
+    """Behave like NumPy arrays, which reject implicit truth-value checks."""
+
+    def __bool__(self):
+        raise ValueError("truth value is ambiguous")
+
+
 class FakeChromaCollection:
     def __init__(self) -> None:
         self.metadata = {"hnsw:space": "cosine"}
@@ -39,7 +46,7 @@ class FakeChromaCollection:
             keys = keys[offset : offset + limit if limit is not None else None]
         return {
             "ids": keys,
-            "embeddings": [self.rows[key][0] for key in keys],
+            "embeddings": AmbiguousSequence(self.rows[key][0] for key in keys),
             "documents": [self.rows[key][1] for key in keys],
             "metadatas": [self.rows[key][2] for key in keys],
         }

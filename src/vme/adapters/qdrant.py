@@ -227,12 +227,19 @@ class QdrantAdapter(SourceAdapter, DestinationAdapter):
                 "Qdrant adapter requires `pip install vector-migration-engine[qdrant]`"
             ) from error
         self._models = models
-        kwargs: dict[str, Any] = {
-            "url": str(self.config.get("url", "http://localhost:6333")),
-            "timeout": float(self.config.get("timeout", 30.0)),
-        }
-        if self.config.get("api_key"):
-            kwargs["api_key"] = str(self.config["api_key"])
+        if path := self.config.get("path"):
+            if self.config.get("url") or self.config.get("api_key"):
+                raise AdapterConfigurationError(
+                    "Qdrant local path cannot be combined with url or api_key"
+                )
+            kwargs: dict[str, Any] = {"path": str(path)}
+        else:
+            kwargs = {
+                "url": str(self.config.get("url", "http://localhost:6333")),
+                "timeout": float(self.config.get("timeout", 30.0)),
+            }
+            if self.config.get("api_key"):
+                kwargs["api_key"] = str(self.config["api_key"])
         self._client_instance = await sdk_call(QdrantClient, **kwargs)
         return self._client_instance
 

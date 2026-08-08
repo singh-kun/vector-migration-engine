@@ -36,3 +36,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+markers = [
+  "integration: tests that exercise real external database SDKs or engines",
+]
